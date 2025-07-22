@@ -32,6 +32,25 @@ class WeightHandler:
         self.transformer = transformer
         self.meta_data = meta_data
 
+    @staticmethod 
+    def load_custom_encoder_weights(
+        encoder_path: str,
+        encoder_type: str  # "clip" or "t5"
+    ) -> dict:
+        """Load weights for a custom encoder from a HuggingFace model path"""
+        custom_encoder_path = WeightHandler._download_or_get_cached_weights(encoder_path)
+        
+        if encoder_type == "clip":
+            # For CLIP encoders, load from text_encoder directory
+            encoder_weights, _, _ = WeightHandler._load_clip_encoder(custom_encoder_path)
+        elif encoder_type == "t5":
+            # For T5 encoders, load from text_encoder_2 directory  
+            encoder_weights, _, _ = WeightHandler._load_t5_encoder(custom_encoder_path)
+        else:
+            raise ValueError(f"Unknown encoder_type: {encoder_type}")
+            
+        return encoder_weights
+
     @staticmethod
     def load_regular_weights(
         repo_id: str | None = None,

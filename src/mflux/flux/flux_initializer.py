@@ -30,6 +30,8 @@ class FluxInitializer:
         lora_names: list[str] | None = None,
         lora_repo_id: str | None = None,
         custom_transformer=None,
+        t5_encoder_path: str | None = None,
+        clip_encoder_path: str | None = None,
     ) -> None:
         # 0. Set paths, configs, and prompt_cache for later
         lora_paths = lora_paths or []
@@ -44,6 +46,12 @@ class FluxInitializer:
         )
 
         # 2. Initialize tokenizers
+        # Use custom encoder paths for tokenizers if provided, otherwise use base model
+        t5_tokenizer_repo = t5_encoder_path if t5_encoder_path else model_config.model_name
+        clip_tokenizer_repo = clip_encoder_path if clip_encoder_path else model_config.model_name
+        
+        # For now, we'll use the base model tokenizers since custom encoder tokenizers
+        # may not be compatible. This is a limitation we may need to address later.
         tokenizers = TokenizerHandler(
             repo_id=model_config.model_name,
             max_t5_length=model_config.max_sequence_length,
@@ -56,6 +64,10 @@ class FluxInitializer:
         flux_model.clip_tokenizer = TokenizerCLIP(
             tokenizer=tokenizers.clip,
         )
+        
+        # Store custom encoder paths for later use
+        flux_model._custom_t5_encoder_path = t5_encoder_path
+        flux_model._custom_clip_encoder_path = clip_encoder_path
 
         # 3. Initialize all models
         flux_model.vae = VAE()
@@ -70,7 +82,35 @@ class FluxInitializer:
                 num_single_transformer_blocks=weights.num_single_transformer_blocks(),
             )
 
-        # 4. Apply weights and quantize the models
+        # 4. Load custom encoder weights if provided
+        custom_t5_weights = None
+        custom_clip_weights = None
+        
+        if t5_encoder_path:
+            print(f"[mflux] Loading custom T5 encoder from: {t5_encoder_path}")
+            try:
+                custom_t5_weights = WeightHandler.load_custom_encoder_weights(
+                    encoder_path=t5_encoder_path,
+                    encoder_type="t5"
+                )
+                print(f"[mflux] Successfully loaded custom T5 encoder")
+            except Exception as e:
+                print(f"[mflux] Warning: Failed to load custom T5 encoder: {e}")
+                print(f"[mflux] Falling back to default T5 encoder")
+        
+        if clip_encoder_path:
+            print(f"[mflux] Loading custom CLIP encoder from: {clip_encoder_path}")
+            try:
+                custom_clip_weights = WeightHandler.load_custom_encoder_weights(
+                    encoder_path=clip_encoder_path,
+                    encoder_type="clip"
+                )
+                print(f"[mflux] Successfully loaded custom CLIP encoder")
+            except Exception as e:
+                print(f"[mflux] Warning: Failed to load custom CLIP encoder: {e}")
+                print(f"[mflux] Falling back to default CLIP encoder")
+        
+        # 5. Apply weights and quantize the models
         flux_model.bits = WeightUtil.set_weights_and_quantize(
             quantize_arg=quantize,
             weights=weights,
@@ -79,8 +119,17 @@ class FluxInitializer:
             t5_text_encoder=flux_model.t5_text_encoder,
             clip_text_encoder=flux_model.clip_text_encoder,
         )
+        
+        # 6. Apply custom encoder weights after base weights are loaded
+        if custom_t5_weights:
+            print(f"[mflux] Applying custom T5 encoder weights")
+            flux_model.t5_text_encoder.update(custom_t5_weights)
+            
+        if custom_clip_weights:
+            print(f"[mflux] Applying custom CLIP encoder weights") 
+            flux_model.clip_text_encoder.update(custom_clip_weights)
 
-        # 5. Set LoRA weights
+        # 7. Set LoRA weights
         hf_lora_paths = WeightHandlerLoRAHuggingFace.download_loras(
             lora_names=lora_names,
             repo_id=lora_repo_id,

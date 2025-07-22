@@ -33,6 +33,8 @@ class Flux1(nn.Module):
         local_path: str | None = None,
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
+        t5_encoder_path: str | None = None,
+        clip_encoder_path: str | None = None,
     ):
         super().__init__()
         FluxInitializer.init(
@@ -42,6 +44,8 @@ class Flux1(nn.Module):
             local_path=local_path,
             lora_paths=lora_paths,
             lora_scales=lora_scales,
+            t5_encoder_path=t5_encoder_path,
+            clip_encoder_path=clip_encoder_path,
         )
 
     def generate_image(
@@ -149,10 +153,17 @@ class Flux1(nn.Module):
         )
 
     @staticmethod
-    def from_name(model_name: str, quantize: int | None = None) -> "Flux1":
+    def from_name(
+        model_name: str, 
+        quantize: int | None = None,
+        t5_encoder_path: str | None = None,
+        clip_encoder_path: str | None = None,
+    ) -> "Flux1":
         return Flux1(
             model_config=ModelConfig.from_name(model_name=model_name, base_model=None),
             quantize=quantize,
+            t5_encoder_path=t5_encoder_path,
+            clip_encoder_path=clip_encoder_path,
         )
 
     def save_model(self, base_path: str) -> None:
