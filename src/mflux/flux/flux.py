@@ -156,12 +156,18 @@ class Flux1(nn.Module):
     def from_name(
         model_name: str, 
         quantize: int | None = None,
+        local_path: str | None = None,
+        lora_paths: list[str] | None = None,
+        lora_scales: list[float] | None = None,
         t5_encoder_path: str | None = None,
         clip_encoder_path: str | None = None,
     ) -> "Flux1":
         return Flux1(
             model_config=ModelConfig.from_name(model_name=model_name, base_model=None),
             quantize=quantize,
+            local_path=local_path,
+            lora_paths=lora_paths,
+            lora_scales=lora_scales,
             t5_encoder_path=t5_encoder_path,
             clip_encoder_path=clip_encoder_path,
         )
