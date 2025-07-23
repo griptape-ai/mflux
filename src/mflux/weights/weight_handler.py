@@ -37,8 +37,9 @@ class WeightHandler:
         encoder_path: str,
         encoder_type: str  # "clip" or "t5"
     ) -> dict:
-        """Load weights for a custom encoder from a HuggingFace model path"""
-        custom_encoder_path = WeightHandler._download_or_get_cached_weights(encoder_path)
+        """Load weights for a custom encoder from HuggingFace cache (NO DOWNLOADING)"""
+        # Find the model in HuggingFace cache without downloading
+        custom_encoder_path = WeightHandler._find_cached_model(encoder_path)
         
         if encoder_type == "clip":
             # For CLIP encoders, load from text_encoder directory
@@ -52,9 +53,50 @@ class WeightHandler:
         return encoder_weights
 
     @staticmethod
+    def _find_cached_model(repo_id: str) -> Path:
+        """Find model in HuggingFace cache without downloading"""
+        try:
+            from huggingface_hub import scan_cache_dir
+        except ImportError:
+            raise ImportError("huggingface_hub required to access cache")
+        
+        print(f"[mflux] DEBUG: Looking for {repo_id} in HuggingFace cache")
+        
+        try:
+            cache_info = scan_cache_dir()
+            
+            for repo in cache_info.repos:
+                if repo.repo_id == repo_id:
+                    print(f"[mflux] DEBUG: Found {repo_id} in cache")
+                    if len(repo.revisions) > 0:
+                        # Get the latest revision's snapshot path
+                        latest_revision = next(iter(repo.revisions))
+                        snapshot_path = Path(latest_revision.snapshot_path)
+                        print(f"[mflux] DEBUG: Using cached path: {snapshot_path}")
+                        return snapshot_path
+                    else:
+                        raise FileNotFoundError(f"No revisions found for {repo_id} in cache")
+            
+            raise FileNotFoundError(f"Model {repo_id} not found in HuggingFace cache. Please download it first.")
+            
+        except Exception as e:
+            print(f"[mflux] DEBUG: Error scanning cache: {e}")
+            raise
+
+    @staticmethod
     def _load_standalone_t5_encoder(root_path: Path) -> tuple[dict, int, str | None]:
         """Load weights for a standalone T5 encoder model"""
         import mlx.core as mx
+        
+        print(f"[mflux] DEBUG: Loading T5 from path: {root_path}")
+        print(f"[mflux] DEBUG: Path exists: {root_path.exists()}")
+        
+        if not root_path.exists():
+            raise FileNotFoundError(f"T5 encoder path does not exist: {root_path}")
+        
+        # List all files for debugging
+        all_files = list(root_path.iterdir())
+        print(f"[mflux] DEBUG: Files in T5 directory: {[f.name for f in all_files[:10]]}")  # Show first 10
         
         weights = []
         quantization_level = None
@@ -62,13 +104,16 @@ class WeightHandler:
 
         # Look for .safetensors files directly in root
         safetensors_files = list(root_path.glob("*.safetensors"))
+        print(f"[mflux] DEBUG: Found {len(safetensors_files)} safetensors files")
+        
         if not safetensors_files:
-            # Fallback to model.safetensors or pytorch_model.bin
+            # Fallback to model.safetensors
             safetensors_files = list(root_path.glob("model.safetensors"))
             if not safetensors_files:
                 raise FileNotFoundError(f"No safetensors files found in {root_path}")
 
         for file in sorted(safetensors_files):
+            print(f"[mflux] DEBUG: Loading weights from: {file.name}")
             data = mx.load(str(file), return_metadata=True)
             weight = list(data[0].items())
             if len(data) > 1:
@@ -78,32 +123,63 @@ class WeightHandler:
 
         # Convert to dict format
         weights_dict = dict(weights)
+        print(f"[mflux] DEBUG: Loaded {len(weights_dict)} weight tensors")
+        print(f"[mflux] DEBUG: Top-level keys: {list(weights_dict.keys())[:10]}")  # Show first 10 keys
 
         # Process T5 weights to match expected format (same as _load_t5_encoder)
         if quantization_level is not None:
+            print(f"[mflux] DEBUG: Using pre-quantized weights (level: {quantization_level})")
             return weights_dict, quantization_level, mflux_version
 
         # Reshape and process the huggingface weights for standalone T5
         if "encoder" in weights_dict:
+            print(f"[mflux] DEBUG: Processing HuggingFace T5 format")
             weights_dict["final_layer_norm"] = weights_dict["encoder"]["final_layer_norm"]
-            for block in weights_dict["encoder"]["block"]:
-                attention = block["layer"][0]
-                ff = block["layer"][1]
-                block.pop("layer")
-                block["attention"] = attention
-                block["ff"] = ff
+            
+            blocks = weights_dict["encoder"]["block"]
+            print(f"[mflux] DEBUG: Processing {len(blocks)} T5 blocks")
+            
+            for i, block in enumerate(blocks):
+                try:
+                    if "layer" not in block:
+                        print(f"[mflux] DEBUG: Block {i} missing 'layer' key, skipping")
+                        continue
+                    
+                    layers = block["layer"]
+                    if len(layers) < 2:
+                        print(f"[mflux] DEBUG: Block {i} has only {len(layers)} layers, expected 2")
+                        continue
+                        
+                    attention = layers[0]
+                    ff = layers[1]
+                    block.pop("layer")
+                    block["attention"] = attention
+                    block["ff"] = ff
+                except (KeyError, IndexError) as e:
+                    print(f"[mflux] DEBUG: Error processing block {i}: {e}")
+                    continue
 
             weights_dict["t5_blocks"] = weights_dict["encoder"]["block"]
 
-            # Only the first layer has the weights for "relative_attention_bias", we duplicate them here to keep code simple
-            if weights_dict["t5_blocks"] and "attention" in weights_dict["t5_blocks"][0] and "SelfAttention" in weights_dict["t5_blocks"][0]["attention"]:
-                relative_attention_bias = weights_dict["t5_blocks"][0]["attention"]["SelfAttention"].get("relative_attention_bias")
-                if relative_attention_bias is not None:
+            # Handle relative_attention_bias
+            if weights_dict["t5_blocks"]:
+                first_block = weights_dict["t5_blocks"][0]
+                if ("attention" in first_block and 
+                    "SelfAttention" in first_block["attention"] and
+                    "relative_attention_bias" in first_block["attention"]["SelfAttention"]):
+                    
+                    relative_attention_bias = first_block["attention"]["SelfAttention"]["relative_attention_bias"]
+                    print(f"[mflux] DEBUG: Copying relative_attention_bias to {len(weights_dict['t5_blocks'])-1} other blocks")
+                    
                     for block in weights_dict["t5_blocks"][1:]:
-                        if "attention" in block and "SelfAttention" in block["attention"]:
+                        if ("attention" in block and 
+                            "SelfAttention" in block["attention"]):
                             block["attention"]["SelfAttention"]["relative_attention_bias"] = relative_attention_bias
 
             weights_dict.pop("encoder")
+            print(f"[mflux] DEBUG: Successfully processed standalone T5 encoder")
+        else:
+            print(f"[mflux] DEBUG: No 'encoder' key found, using weights as-is")
 
         return weights_dict, quantization_level, mflux_version
 
