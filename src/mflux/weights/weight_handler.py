@@ -44,12 +44,68 @@ class WeightHandler:
             # For CLIP encoders, load from text_encoder directory
             encoder_weights, _, _ = WeightHandler._load_clip_encoder(custom_encoder_path)
         elif encoder_type == "t5":
-            # For T5 encoders, load from text_encoder_2 directory  
-            encoder_weights, _, _ = WeightHandler._load_t5_encoder(custom_encoder_path)
+            # For standalone T5 encoders, load directly from model root
+            encoder_weights, _, _ = WeightHandler._load_standalone_t5_encoder(custom_encoder_path)
         else:
             raise ValueError(f"Unknown encoder_type: {encoder_type}")
             
         return encoder_weights
+
+    @staticmethod
+    def _load_standalone_t5_encoder(root_path: Path) -> tuple[dict, int, str | None]:
+        """Load weights for a standalone T5 encoder model"""
+        import mlx.core as mx
+        
+        weights = []
+        quantization_level = None
+        mflux_version = None
+
+        # Look for .safetensors files directly in root
+        safetensors_files = list(root_path.glob("*.safetensors"))
+        if not safetensors_files:
+            # Fallback to model.safetensors or pytorch_model.bin
+            safetensors_files = list(root_path.glob("model.safetensors"))
+            if not safetensors_files:
+                raise FileNotFoundError(f"No safetensors files found in {root_path}")
+
+        for file in sorted(safetensors_files):
+            data = mx.load(str(file), return_metadata=True)
+            weight = list(data[0].items())
+            if len(data) > 1:
+                quantization_level = data[1].get("quantization_level")
+                mflux_version = data[1].get("mflux_version")
+            weights.extend(weight)
+
+        # Convert to dict format
+        weights_dict = dict(weights)
+
+        # Process T5 weights to match expected format (same as _load_t5_encoder)
+        if quantization_level is not None:
+            return weights_dict, quantization_level, mflux_version
+
+        # Reshape and process the huggingface weights for standalone T5
+        if "encoder" in weights_dict:
+            weights_dict["final_layer_norm"] = weights_dict["encoder"]["final_layer_norm"]
+            for block in weights_dict["encoder"]["block"]:
+                attention = block["layer"][0]
+                ff = block["layer"][1]
+                block.pop("layer")
+                block["attention"] = attention
+                block["ff"] = ff
+
+            weights_dict["t5_blocks"] = weights_dict["encoder"]["block"]
+
+            # Only the first layer has the weights for "relative_attention_bias", we duplicate them here to keep code simple
+            if weights_dict["t5_blocks"] and "attention" in weights_dict["t5_blocks"][0] and "SelfAttention" in weights_dict["t5_blocks"][0]["attention"]:
+                relative_attention_bias = weights_dict["t5_blocks"][0]["attention"]["SelfAttention"].get("relative_attention_bias")
+                if relative_attention_bias is not None:
+                    for block in weights_dict["t5_blocks"][1:]:
+                        if "attention" in block and "SelfAttention" in block["attention"]:
+                            block["attention"]["SelfAttention"]["relative_attention_bias"] = relative_attention_bias
+
+            weights_dict.pop("encoder")
+
+        return weights_dict, quantization_level, mflux_version
 
     @staticmethod
     def load_regular_weights(
