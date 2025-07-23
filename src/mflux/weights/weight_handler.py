@@ -427,3 +427,92 @@ class WeightHandler:
                 ],
             )
         )
+    
+    @staticmethod
+    def load_custom_encoder_weights(encoder_path: str, encoder_type: str) -> dict:
+        """Load custom T5 or CLIP encoder weights from cache"""
+        try:
+            root_path = WeightHandler._find_cached_model(encoder_path)
+            
+            if encoder_type.lower() == "t5":
+                print(f"[mflux] Loading custom T5 encoder weights from: {root_path}")
+                weights_dict, _, _ = WeightHandler._load_standalone_t5_encoder(root_path)
+                return weights_dict
+            elif encoder_type.lower() == "clip":
+                print(f"[mflux] Loading custom CLIP encoder weights from: {root_path}")
+                weights_dict, _, _ = WeightHandler._load_standalone_clip_encoder(root_path)
+                return weights_dict
+            else:
+                raise ValueError(f"Unsupported encoder type: {encoder_type}. Must be 't5' or 'clip'")
+                
+        except Exception as e:
+            print(f"[mflux] Error loading custom {encoder_type} encoder: {e}")
+            raise
+    
+    @staticmethod
+    def _load_standalone_clip_encoder(root_path: Path) -> tuple[dict, int, str | None]:
+        """Load weights for a standalone CLIP encoder model"""
+        import mlx.core as mx
+        
+        print(f"[mflux] DEBUG: Loading CLIP from path: {root_path}")
+        print(f"[mflux] DEBUG: Path exists: {root_path.exists()}")
+        
+        if not root_path.exists():
+            raise FileNotFoundError(f"CLIP encoder path does not exist: {root_path}")
+        
+        weights = []
+        quantization_level = None
+        mflux_version = None
+
+        # Check if root_path is a specific file or directory
+        if root_path.is_file():
+            # Loading a specific file
+            if root_path.suffix == ".safetensors":
+                print(f"[mflux] DEBUG: Loading specific safetensors file: {root_path.name}")
+                data = mx.load(str(root_path), return_metadata=True)
+                weight = list(data[0].items())
+                if len(data) > 1:
+                    quantization_level = data[1].get("quantization_level")
+                    mflux_version = data[1].get("mflux_version")
+                weights.extend(weight)
+                file_format = "safetensors"
+            elif root_path.suffix in [".bin"]:
+                # Don't load .bin files - MLX doesn't support them
+                raise ValueError(f"Cannot load {root_path.suffix} format - MLX requires .safetensors format")
+            else:
+                raise ValueError(f"Unsupported file format: {root_path.suffix}")
+        else:
+            # Loading from directory - look for safetensors files only
+            all_files = list(root_path.iterdir()) if root_path.is_dir() else []
+            print(f"[mflux] DEBUG: Files in CLIP directory: {[f.name for f in all_files[:10]]}")  # Show first 10
+            
+            # Look for .safetensors files only (no .bin support)
+            model_files = [f for f in all_files if f.suffix == ".safetensors" and "clip" in f.name.lower()]
+            file_format = "safetensors"
+            print(f"[mflux] DEBUG: Found {len(model_files)} CLIP safetensors files")
+            
+            if not model_files:
+                raise FileNotFoundError(f"No supported CLIP .safetensors files found in {root_path}")
+
+            print(f"[mflux] DEBUG: Loading {file_format} format weights")
+            for file in sorted(model_files):
+                print(f"[mflux] DEBUG: Loading weights from: {file.name}")
+                data = mx.load(str(file), return_metadata=True)
+                weight = list(data[0].items())
+                if len(data) > 1:
+                    quantization_level = data[1].get("quantization_level")
+                    mflux_version = data[1].get("mflux_version")
+                weights.extend(weight)
+
+        if not weights:
+            raise ValueError(f"No weights loaded from {root_path}")
+
+        print(f"[mflux] DEBUG: Loaded {len(weights)} weight tensors for CLIP encoder")
+
+        # Convert to dict - CLIP encoders typically have simpler structure than T5
+        weights_dict = dict(weights)
+        
+        print(f"[mflux] DEBUG: CLIP encoder keys: {list(weights_dict.keys())[:10]}")  # Show first 10 keys
+        print(f"[mflux] DEBUG: Successfully processed standalone CLIP encoder")
+        
+        return weights_dict, quantization_level, mflux_version
