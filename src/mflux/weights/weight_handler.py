@@ -38,6 +38,7 @@ class WeightHandler:
         encoder_type: str  # "clip" or "t5"
     ) -> dict:
         """Load weights for a custom encoder from HuggingFace cache (NO DOWNLOADING)"""
+        print(f"[mflux] ✅ NEW CACHE-ONLY CODE IS RUNNING for {encoder_path}")
         # Find the model in HuggingFace cache without downloading
         custom_encoder_path = WeightHandler._find_cached_model(encoder_path)
         
@@ -102,17 +103,27 @@ class WeightHandler:
         quantization_level = None
         mflux_version = None
 
-        # Look for .safetensors files directly in root
-        safetensors_files = list(root_path.glob("*.safetensors"))
-        print(f"[mflux] DEBUG: Found {len(safetensors_files)} safetensors files")
+        # Look for .safetensors files first
+        model_files = list(root_path.glob("*.safetensors"))
+        file_format = "safetensors"
+        print(f"[mflux] DEBUG: Found {len(model_files)} safetensors files")
         
-        if not safetensors_files:
-            # Fallback to model.safetensors
-            safetensors_files = list(root_path.glob("model.safetensors"))
-            if not safetensors_files:
-                raise FileNotFoundError(f"No safetensors files found in {root_path}")
+        if not model_files:
+            # Fallback to pytorch_model.bin files
+            model_files = list(root_path.glob("pytorch_model*.bin"))
+            file_format = "pytorch"
+            print(f"[mflux] DEBUG: Found {len(model_files)} pytorch_model.bin files")
+            
+            if not model_files:
+                # Last fallback to any .bin files
+                model_files = list(root_path.glob("*.bin"))
+                print(f"[mflux] DEBUG: Found {len(model_files)} .bin files")
+                
+                if not model_files:
+                    raise FileNotFoundError(f"No model files (.safetensors or .bin) found in {root_path}")
 
-        for file in sorted(safetensors_files):
+        print(f"[mflux] DEBUG: Loading {file_format} format weights")
+        for file in sorted(model_files):
             print(f"[mflux] DEBUG: Loading weights from: {file.name}")
             data = mx.load(str(file), return_metadata=True)
             weight = list(data[0].items())
