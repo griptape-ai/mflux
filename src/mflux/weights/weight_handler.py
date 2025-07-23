@@ -63,22 +63,45 @@ class WeightHandler:
         
         print(f"[mflux] DEBUG: Looking for {repo_id} in HuggingFace cache")
         
+        # Check if this is a specific file path (repo_id/filename)
+        if "/" in repo_id and repo_id.count("/") > 1:
+            # Format: "comfyanonymous/flux_text_encoders/t5xxl_fp8_e4m3fn.safetensors"
+            parts = repo_id.split("/")
+            actual_repo_id = "/".join(parts[:-1])  # "comfyanonymous/flux_text_encoders"
+            filename = parts[-1]  # "t5xxl_fp8_e4m3fn.safetensors"
+            print(f"[mflux] DEBUG: Parsed repo: {actual_repo_id}, file: {filename}")
+        else:
+            # Standard repo_id
+            actual_repo_id = repo_id
+            filename = None
+        
         try:
             cache_info = scan_cache_dir()
             
             for repo in cache_info.repos:
-                if repo.repo_id == repo_id:
-                    print(f"[mflux] DEBUG: Found {repo_id} in cache")
+                if repo.repo_id == actual_repo_id:
+                    print(f"[mflux] DEBUG: Found {actual_repo_id} in cache")
                     if len(repo.revisions) > 0:
                         # Get the latest revision's snapshot path
                         latest_revision = next(iter(repo.revisions))
                         snapshot_path = Path(latest_revision.snapshot_path)
-                        print(f"[mflux] DEBUG: Using cached path: {snapshot_path}")
-                        return snapshot_path
+                        
+                        if filename:
+                            # Return specific file path
+                            file_path = snapshot_path / filename
+                            if file_path.exists():
+                                print(f"[mflux] DEBUG: Using specific file: {file_path}")
+                                return file_path
+                            else:
+                                raise FileNotFoundError(f"File {filename} not found in {snapshot_path}")
+                        else:
+                            # Return directory path
+                            print(f"[mflux] DEBUG: Using cached path: {snapshot_path}")
+                            return snapshot_path
                     else:
-                        raise FileNotFoundError(f"No revisions found for {repo_id} in cache")
+                        raise FileNotFoundError(f"No revisions found for {actual_repo_id} in cache")
             
-            raise FileNotFoundError(f"Model {repo_id} not found in HuggingFace cache. Please download it first.")
+            raise FileNotFoundError(f"Model {actual_repo_id} not found in HuggingFace cache. Please download it first.")
             
         except Exception as e:
             print(f"[mflux] DEBUG: Error scanning cache: {e}")
@@ -95,42 +118,49 @@ class WeightHandler:
         if not root_path.exists():
             raise FileNotFoundError(f"T5 encoder path does not exist: {root_path}")
         
-        # List all files for debugging
-        all_files = list(root_path.iterdir())
-        print(f"[mflux] DEBUG: Files in T5 directory: {[f.name for f in all_files[:10]]}")  # Show first 10
-        
         weights = []
         quantization_level = None
         mflux_version = None
 
-        # Look for .safetensors files first
-        model_files = list(root_path.glob("*.safetensors"))
-        file_format = "safetensors"
-        print(f"[mflux] DEBUG: Found {len(model_files)} safetensors files")
-        
-        if not model_files:
-            # Fallback to pytorch_model.bin files
-            model_files = list(root_path.glob("pytorch_model*.bin"))
-            file_format = "pytorch"
-            print(f"[mflux] DEBUG: Found {len(model_files)} pytorch_model.bin files")
+        # Check if root_path is a specific file or directory
+        if root_path.is_file():
+            # Loading a specific file
+            if root_path.suffix == ".safetensors":
+                print(f"[mflux] DEBUG: Loading specific safetensors file: {root_path.name}")
+                data = mx.load(str(root_path), return_metadata=True)
+                weight = list(data[0].items())
+                if len(data) > 1:
+                    quantization_level = data[1].get("quantization_level")
+                    mflux_version = data[1].get("mflux_version")
+                weights.extend(weight)
+                file_format = "safetensors"
+            elif root_path.suffix in [".bin"]:
+                # Don't load .bin files - MLX doesn't support them
+                raise ValueError(f"Cannot load {root_path.suffix} format - MLX requires .safetensors format")
+            else:
+                raise ValueError(f"Unsupported file format: {root_path.suffix}")
+        else:
+            # Loading from directory - look for safetensors files only
+            all_files = list(root_path.iterdir()) if root_path.is_dir() else []
+            print(f"[mflux] DEBUG: Files in T5 directory: {[f.name for f in all_files[:10]]}")  # Show first 10
+            
+            # Look for .safetensors files only (no .bin support)
+            model_files = [f for f in all_files if f.suffix == ".safetensors" and "t5" in f.name.lower()]
+            file_format = "safetensors"
+            print(f"[mflux] DEBUG: Found {len(model_files)} T5 safetensors files")
             
             if not model_files:
-                # Last fallback to any .bin files
-                model_files = list(root_path.glob("*.bin"))
-                print(f"[mflux] DEBUG: Found {len(model_files)} .bin files")
-                
-                if not model_files:
-                    raise FileNotFoundError(f"No model files (.safetensors or .bin) found in {root_path}")
+                raise FileNotFoundError(f"No supported T5 .safetensors files found in {root_path}")
 
-        print(f"[mflux] DEBUG: Loading {file_format} format weights")
-        for file in sorted(model_files):
-            print(f"[mflux] DEBUG: Loading weights from: {file.name}")
-            data = mx.load(str(file), return_metadata=True)
-            weight = list(data[0].items())
-            if len(data) > 1:
-                quantization_level = data[1].get("quantization_level")
-                mflux_version = data[1].get("mflux_version")
-            weights.extend(weight)
+            print(f"[mflux] DEBUG: Loading {file_format} format weights")
+            for file in sorted(model_files):
+                print(f"[mflux] DEBUG: Loading weights from: {file.name}")
+                data = mx.load(str(file), return_metadata=True)
+                weight = list(data[0].items())
+                if len(data) > 1:
+                    quantization_level = data[1].get("quantization_level")
+                    mflux_version = data[1].get("mflux_version")
+                weights.extend(weight)
 
         # Convert to dict format
         weights_dict = dict(weights)
